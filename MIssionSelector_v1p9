@@ -1,0 +1,592 @@
+
+; =====================================================================
+; MissionSelector_GWA3_v1p9.au3 — Mission Selector & Runner
+; Updates in v1.9:
+; - Adds "Preferred Heroes" input (comma-separated names/IDs).
+; - Nightfall: always ensures mission-required heroes are included.
+; - Merges user picks + required heroes, enforces party-size cap (default 8).
+; - Uses real hero IDs via GwAu3_Const_Party.au3 (if present).
+; =====================================================================
+
+#AutoIt3Wrapper_UseX64=n
+Opt("MustDeclareVars", 1)
+
+#include <GUIConstantsEx.au3>
+#include <WindowsConstants.au3>
+#include <EditConstants.au3>
+#include <ComboConstants.au3>
+#include <StaticConstants.au3>
+#include <MsgBoxConstants.au3>
+#include <GuiEdit.au3>
+#include <Array.au3>
+
+; ====== Resolve library path (works when script lives under Scripts/ or root) ======
+Global Const $LIB_DIR_A = @ScriptDir & "\GwAu3"
+Global Const $LIB_DIR_B = @ScriptDir & "\..\GwAu3"
+Global Const $LIB_DIR = FileExists($LIB_DIR_A & "\_GwAu3.au3") ? $LIB_DIR_A : $LIB_DIR_B
+
+If Not FileExists($LIB_DIR & "\_GwAu3.au3") Then
+    MsgBox($MB_ICONERROR, "GWA3 Missing", "Expected: " & @CRLF & $LIB_DIR_A & "\_GwAu3.au3" & @CRLF & "or" & @CRLF & $LIB_DIR_B & "\_GwAu3.au3")
+    Exit 1
+EndIf
+#include "GwAu3\_GwAu3.au3"
+; Try both include roots depending on where we are
+If FileExists(@ScriptDir & "GwAu3\Constants\GwAu3_Const_Map.au3") Then
+    #include "GwAu3\Constants\GwAu3_Const_Map.au3"
+    #include "GwAu3\Modules\Cmd\GwAu3_Cmd_Party.au3"
+    #include "GwAu3\Modules\Data\GwAu3_Data_Party.au3"
+    #include "GwAu3\Constants\GwAu3_Const_Party.au3"
+Else
+    #include "GwAu3\Constants\GwAu3_Const_Map.au3"
+    #include "GwAu3\Modules\Cmd\GwAu3_Cmd_Party.au3"
+    #include "GwAu3\Modules\Data\GwAu3_Data_Party.au3"
+    #include "GwAu3\Constants\GwAu3_Const_Party.au3"
+EndIf
+
+; GUI
+Global Const $WIN_W = 1000, $WIN_H = 640, $PAD = 10
+Global $g_hGUI = GUICreate("GWA3 Mission Selector (Alexander) — v1.9", $WIN_W, $WIN_H, -1, -1, BitOR($WS_MINIMIZEBOX, $WS_SYSMENU))
+OnAutoItExitRegister("_Cleanup")
+
+GUICtrlCreateGroup("Attach", $PAD, $PAD, $WIN_W - 2*$PAD, 92)
+GUICtrlCreateLabel("Character (name or regex):", $PAD + 10, $PAD + 22, 170, 18)
+Global $g_hChar = GUICtrlCreateInput("", $PAD + 180, $PAD + 18, 280, 22)
+GUICtrlCreateLabel("PID (optional):", $PAD + 480, $PAD + 22, 90, 18)
+Global $g_hPid  = GUICtrlCreateInput("", $PAD + 570, $PAD + 18, 110, 22)
+Global $g_hAttach = GUICtrlCreateButton("Attach", $PAD + 690, $PAD + 16, 110, 26)
+Global $g_hAttachedLbl = GUICtrlCreateLabel("Status: Not attached", $PAD + 10, $PAD + 50, 400, 18)
+
+GUICtrlCreateGroup("Select a Mission", $PAD, $PAD + 100, $WIN_W - 2*$PAD, 170)
+GUICtrlCreateLabel("Prophecies:", $PAD + 10, $PAD + 120, 100, 18)
+Global $g_cboProp = GUICtrlCreateCombo("", $PAD + 110, $PAD + 116, 330, 24, BitOR($CBS_DROPDOWNLIST, $WS_VSCROLL))
+GUICtrlCreateLabel("Factions:", $PAD + 470, $PAD + 120, 100, 18)
+Global $g_cboFact = GUICtrlCreateCombo("", $PAD + 560, $PAD + 116, 330, 24, BitOR($CBS_DROPDOWNLIST, $WS_VSCROLL))
+GUICtrlCreateLabel("Nightfall:", $PAD + 10, $PAD + 160, 100, 18)
+Global $g_cboNF = GUICtrlCreateCombo("", $PAD + 110, $PAD + 156, 330, 24, BitOR($CBS_DROPDOWNLIST, $WS_VSCROLL))
+GUICtrlCreateLabel("Eye of the North (Primaries):", $PAD + 470, $PAD + 160, 200, 18)
+Global $g_cboEotN = GUICtrlCreateCombo("", $PAD + 680, $PAD + 156, 210, 24, BitOR($CBS_DROPDOWNLIST, $WS_VSCROLL))
+
+GUICtrlCreateGroup("Heroes", $PAD, $PAD + 280, $WIN_W - 2*$PAD, 86)
+GUICtrlCreateLabel("Preferred Heroes (comma-separated names or IDs):", $PAD + 10, $PAD + 300, 320, 18)
+Global $g_hHeroLine = GUICtrlCreateInput("", $PAD + 340, $PAD + 296, 520, 22)
+GUICtrlCreateLabel("Party Size Cap:", $PAD + 10, $PAD + 330, 120, 18)
+Global $g_hCap = GUICtrlCreateCombo("8", $PAD + 130, $PAD + 326, 60, 24, $CBS_DROPDOWNLIST)
+GUICtrlSetData($g_hCap, "4|6|8", "8")
+
+Global $g_btnRun = GUICtrlCreateButton("Run Selected Mission", $PAD + 10, $PAD + 380, 220, 30)
+
+GUICtrlCreateLabel("Log:", $PAD + 10, $PAD + 420, 40, 18)
+Global $g_hLog = GUICtrlCreateEdit("", $PAD + 10, $PAD + 440, $WIN_W - 2*$PAD - 20, 160, BitOR($ES_READONLY, $WS_VSCROLL, $ES_AUTOVSCROLL))
+
+GUISetState(@SW_SHOW, $g_hGUI)
+
+; State
+Global $g_bAttached = False
+
+; Mission lists
+Global $PROP_MISSIONS[] = [ _
+    "The Great Northern Wall", "Fort Ranik", "Ruins of Surmia", "Nolani Academy", _
+    "Borlis Pass", "The Frost Gate", _
+    "Gates of Kryta", "D'Alessio Seaboard", "Divinity Coast", _
+    "The Wilds", "Bloodstone Fen", "Aurora Glade", "Riverside Province", "Sanctum Cay", _
+    "Dunes of Despair", "Thirsty River", "Elona Reach", "Augury Rock", "Dragon's Lair", _
+    "Ice Caves of Sorrow", "Iron Mines of Moladune", "Thunderhead Keep", _
+    "Ring of Fire", "Abaddon's Mouth", "Hell's Precipice" _
+]
+Global $FACT_MISSIONS[] = [ _
+    "Minister Cho's Estate", "Zen Daijun", _
+    "Vizunah Square (Local Quarter)", "Vizunah Square (Foreign Quarter)", _
+    "Nahpui Quarter", "Tahnnakai Temple", _
+    "Arborstone", "Boreas Seabed", "Unwaking Waters", _
+    "Sunjiang District", _
+    "Gyala Hatchery", "The Eternal Grove", _
+    "Raisu Palace", "Imperial Sanctum" _
+]
+Global $NF_MISSIONS[] = [ _
+    "Chahbek Village", "Jokanur Diggings", "Consulate Docks", _
+    "Venta Cemetery", "Pogahn Passage", "Rilohn Refuge", "Moddok Crevice", "Nundu Bay", _
+    "Dzagonur Bastion", "Grand Court of Sebelkeh", "Jennur's Horde", "Tihark Orchard", "Kodash Bazaar", _
+    "Gate of Desolation", "Ruins of Morah", "Gate of Madness", "Abaddon's Gate" _
+]
+Global $EOTN_PRIMARY[] = [ _
+    "Against the Charr", "The Elusive G.O.L.E.M.", "Genius Operated Living Enchanted Manifestation", _
+    "A Gate Too Far", "Blood Washes Blood", "Curse of the Nornbear", "A Time for Heroes" _
+]
+
+_GuiFillCombo($g_cboProp, $PROP_MISSIONS)
+_GuiFillCombo($g_cboFact, $FACT_MISSIONS)
+_GuiFillCombo($g_cboNF,   $NF_MISSIONS)
+_GuiFillCombo($g_cboEotN, $EOTN_PRIMARY)
+
+_Log("Ready. Attach, enter optional heroes, pick a mission, Run.")
+
+While True
+    Switch GUIGetMsg()
+        Case $GUI_EVENT_CLOSE
+            _Log("Closing.")
+            _Cleanup()
+            Exit
+        Case $g_hAttach
+            _OnAttach()
+        Case $g_btnRun
+            _OnRunMission()
+    EndSwitch
+WEnd
+
+; ===================== Event Handlers =====================
+Func _OnAttach()
+    Local $charIn = StringStripWS(GUICtrlRead($g_hChar), 3)
+    Local $pidIn  = StringStripWS(GUICtrlRead($g_hPid), 3)
+
+    If $pidIn <> "" Then
+        If Not StringIsInt($pidIn) Then _Err("PID must be integer."); Return
+        _Log("Attaching by PID=" & Int($pidIn) & "...")
+        If Not _Attach(Int($pidIn)) Then Return
+        Return
+    EndIf
+
+    If $charIn = "" Then _Err("Provide character name (or PID)."); Return
+
+    Local $regex = _ToRegex($charIn)
+    _Log("Attaching by name regex: " & $regex)
+    If _Attach($regex) Then Return
+
+    _Err("Attach failed. Try PID from Task Manager (gw.exe).")
+EndFunc
+
+Func _Attach($arg)
+    Local $ok = Core_Initialize($arg, True)
+    If $g_h_GWProcess = 0 Then
+        _Err("Attach failed. Ensure AutoIt x86, Admin rights, and you are in-game.")
+        Return False
+    EndIf
+    $g_bAttached = True
+    Local $charName = ""
+    If IsDeclared("Player_GetCharname") Then $charName = Player_GetCharname()
+    GUICtrlSetData($g_hAttachedLbl, "Status: Attached → PID=" & $g_i_GWProcessId & " | Char=" & $charName)
+    _Log("Attached OK → PID=" & $g_i_GWProcessId & " | Character=" & $charName)
+    Return True
+EndFunc
+
+Func _OnRunMission()
+    If Not _CheckAttach() Then Return
+    Local $picked = _GetPickedMission()
+    If $picked = "" Then _Warn("Pick a mission from one of the dropdowns."); Return
+
+    If Not _TravelToMissionOutpost($picked) Then
+        _Err("Travel failed (or mapping missing) for: " & $picked)
+        Return
+    EndIf
+
+    ; Build final hero team: merge required + user picks, enforce cap
+    Local $cap = Number(GUICtrlRead($g_hCap))
+    Local $userLine = GUICtrlRead($g_hHeroLine)
+    Local $userHeroes = _ParseUserHeroes($userLine)
+    Local $required = _GetRequiredHeroesForMission($picked)
+    Local $team = _MergeHeroes($required, $userHeroes, $cap)
+
+    If UBound($team) > 0 And $team[0] <> 0 Then
+        _Log("Adding heroes (" & UBound($team) & "): " & _JoinIDs($team))
+        For $i = 0 To UBound($team)-1
+            If $team[$i] = 0 Then ContinueLoop
+            If Party_AddHero($team[$i]) Then
+                _Log("> Added hero " & $team[$i])
+                Sleep(200)
+            Else
+                _Warn("> Could not add hero " & $team[$i])
+            EndIf
+        Next
+    Else
+        _Log("No heroes to add.")
+    EndIf
+
+    Local $fn = _MissionNameToFunc($picked)
+    If IsFunc($fn) Then
+        _Log("Calling stub: " & $fn & "()")
+        Call($fn)
+    Else
+        _Log("No specific stub yet for " & $picked & ".")
+    EndIf
+EndFunc
+
+Func _GetPickedMission()
+    Local $selProp = GUICtrlRead($g_cboProp)
+    Local $selFact = GUICtrlRead($g_cboFact)
+    Local $selNF   = GUICtrlRead($g_cboNF)
+    Local $selEotN = GUICtrlRead($g_cboEotN)
+    Local $picked = ""
+    If $selProp <> "" Then $picked = $selProp
+    If $selFact <> "" Then $picked = $selFact
+    If $selNF   <> "" Then $picked = $selNF
+    If $selEotN <> "" Then $picked = $selEotN
+    Return $picked
+EndFunc
+
+; =============== Travel Mapping + Wait ===============
+Func _TravelToMissionOutpost($missionName)
+    Local $name = StringLower(StringStripWS($missionName, 3))
+    Local $mapId = -1
+
+    ; Nightfall mapping
+    Switch $name
+        Case "chahbek village"             ; Istan
+            $mapId = $GC_I_MAP_ID_CHAHBEK_VILLAGE_OUTPOST
+        Case "jokanur diggings"
+            $mapId = $GC_I_MAP_ID_JOKANUR_DIGGINGS_OUTPOST
+        Case "consulate docks"
+            $mapId = $GC_I_MAP_ID_CONSULATE_DOCKS_OUTPOST
+        Case "venta cemetery"              ; Kourna
+            $mapId = $GC_I_MAP_ID_VENTA_CEMETERY_OUTPOST
+        Case "pogahn passage"
+            $mapId = $GC_I_MAP_ID_POGAHN_PASSAGE_OUTPOST
+        Case "rilohn refuge"
+            $mapId = $GC_I_MAP_ID_RILOHN_REFUGE_OUTPOST
+        Case "moddok crevice"
+            $mapId = $GC_I_MAP_ID_MODDOK_CREVICE_OUTPOST
+        Case "nundu bay"
+            $mapId = $GC_I_MAP_ID_NUNDU_BAY_OUTPOST
+        Case "dzagonur bastion"            ; Vabbi
+            $mapId = $GC_I_MAP_ID_DZAGONUR_BASTION_OUTPOST
+        Case "grand court of sebelkeh"
+            $mapId = $GC_I_MAP_ID_GRAND_COURT_OF_SEBELKEH_OUTPOST
+        Case "jennur's horde","jennurs horde"
+            $mapId = $GC_I_MAP_ID_JENNURS_HORDE_OUTPOST
+        Case "tihark orchard"
+            $mapId = $GC_I_MAP_ID_TIHARK_ORCHARD_OUTPOST
+        Case "kodash bazaar","the kodash bazaar"
+            $mapId = $GC_I_MAP_ID_THE_KODASH_BAZAAR
+        Case "gate of desolation"
+            $mapId = $GC_I_MAP_ID_GATE_OF_DESOLATION_OUTPOST
+        Case "ruins of morah"
+            $mapId = $GC_I_MAP_ID_RUINS_OF_MORAH_OUTPOST
+        Case "gate of madness"
+            $mapId = $GC_I_MAP_ID_GATE_OF_MADNESS_OUTPOST
+        Case "abaddon's gate","abaddons gate"
+            $mapId = $GC_I_MAP_ID_ABADDONS_GATE_OUTPOST
+    EndSwitch
+
+    ; Factions mapping
+    If $mapId = -1 Then
+        Switch $name
+            Case "minister cho's estate","minister chos estate"
+                $mapId = $GC_I_MAP_ID_MINISTER_CHOS_ESTATE_OUTPOST
+            Case "zen daijun"
+                $mapId = $GC_I_MAP_ID_ZEN_DAIJUN_OUTPOST
+            Case "vizunah square (local quarter)","vizunah square local quarter","vizunah local"
+                $mapId = $GC_I_MAP_ID_VIZUNAH_SQUARE_LOCAL_QUARTER
+            Case "vizunah square (foreign quarter)","vizunah square foreign quarter","vizunah foreign"
+                $mapId = $GC_I_MAP_ID_VIZUNAH_SQUARE_FOREIGN_QUARTER
+            Case "nahpui quarter"
+                $mapId = $GC_I_MAP_ID_NAHPUI_QUARTER_OUTPOST
+            Case "tahnnakai temple","tahnnakai"
+                $mapId = $GC_I_MAP_ID_TAHNNAKAI_TEMPLE_OUTPOST
+            Case "arborstone"
+                $mapId = $GC_I_MAP_ID_ARBORSTONE_OUTPOST
+            Case "boreas seabed"
+                $mapId = $GC_I_MAP_ID_BOREAS_SEABED_OUTPOST
+            Case "unwaking waters"
+                $mapId = $GC_I_MAP_ID_UNWAKING_WATERS_LUXON ; default
+            Case "sunjiang district"
+                $mapId = $GC_I_MAP_ID_SUNJIANG_DISTRICT_OUTPOST
+            Case "gyala hatchery"
+                $mapId = $GC_I_MAP_ID_GYALA_HATCHERY_OUTPOST
+            Case "the eternal grove","eternal grove"
+                $mapId = 222 ; label exists in constants; name alias missing
+            Case "raisu palace"
+                $mapId = $GC_I_MAP_ID_RAISU_PALACE_OUTPOST
+            Case "imperial sanctum"
+                $mapId = $GC_I_MAP_ID_IMPERIAL_SANCTUM_OUTPOST
+        EndSwitch
+    EndIf
+
+    If $mapId = -1 Then _Warn("No outpost mapping yet for: " & $missionName); Return False
+
+    _Log("Traveling to outpost for [" & $missionName & "] (MapID=" & $mapId & ")...")
+    Map_TravelTo($mapId)
+    If Not _WaitForMapID($mapId, 45000) Then
+        Local $cur = Map_GetCharacterInfo("CurrentMapID")
+        _Err("Did not confirm arrival within timeout. CurrentMapID=" & $cur & ", expected " & $mapId)
+        Return ($cur = $mapId)
+    EndIf
+    _Log("Arrived at outpost OK.")
+    Return True
+EndFunc
+
+Func _WaitForMapID($expected, $timeoutMs)
+    Local $t0 = TimerInit()
+    While TimerDiff($t0) < $timeoutMs
+        Local $cur = Map_GetCharacterInfo("CurrentMapID")
+        If $cur = $expected Then Return True
+        Sleep(200)
+    WEnd
+    Return False
+EndFunc
+
+; =============== Heroes: parse, required, merge, cap, add ===============
+; Build a name→ID lookup from constants we know (Nightfall cast). Extend as needed.
+Func _HeroNameToId($name)
+    Local $n = StringLower(StringStripWS($name, 3))
+    Switch $n
+        Case "koss"
+            Return $GC_I_HERO_ID_KOSS
+        Case "melonni"
+            Return $GC_I_HERO_ID_MELONNI
+        Case "dunkoro"
+            Return $GC_I_HERO_ID_DUNKORO
+        Case "tahlkora"
+            Return $GC_I_HERO_ID_TAHLKORA
+        Case "zhed","zhed shadowhoof","zhed shadowhoof"
+            Return $GC_I_HERO_ID_ZHED_SHADOWHOOF
+        Case "margrid","margrid the sly"
+            Return $GC_I_HERO_ID_MARGRID_THE_SLY
+        Case "master of whispers","mow","whispers"
+            Return $GC_I_HERO_ID_MASTER_OF_WHISPERS
+        Case "general morgahn","morgahn"
+            Return $GC_I_HERO_ID_GENERAL_MORGAHN
+        Case "norgu"
+            Return $GC_I_HERO_ID_NORGU
+        Case "goren"
+            Return $GC_I_HERO_ID_GOREN
+        Case "jin","acolyte jin"
+            Return $GC_I_HERO_ID_ACOLYTE_JIN
+        Case "sousuke","acolyte sousuke"
+            Return $GC_I_HERO_ID_ACOLYTE_SOUSUKE
+        Case Else
+            Return 0
+    EndSwitch
+EndFunc
+
+Func _ParseUserHeroes($line)
+    Local $parts = StringSplit($line, ",", 2) ; array of substrings, no count
+    If @error Or UBound($parts) = 0 Then
+        Local $a0[1]; $a0[0] = 0
+        Return $a0
+    EndIf
+    ; Build a dynamic array of IDs
+    Local $buf[1], $count = 0
+    For $i = 0 To UBound($parts)-1
+        Local $tok = StringStripWS($parts[$i], 3)
+        If $tok = "" Then ContinueLoop
+        Local $id = 0
+        If StringIsInt($tok) Then
+            $id = Int($tok)
+        Else
+            $id = _HeroNameToId($tok)
+        EndIf
+        If $id = 0 Then
+            _Warn("Unknown hero: " & $tok)
+            ContinueLoop
+        EndIf
+        ; Append unique
+        If Not _Contains($buf, $count, $id) Then
+            _Append($buf, $count, $id)
+        EndIf
+    Next
+    If $count = 0 Then
+        Local $a0[1]; $a0[0] = 0
+        Return $a0
+    EndIf
+    Local $out[$count]
+    For $k = 0 To $count-1
+        $out[$k] = $buf[$k]
+    Next
+    Return $out
+EndFunc
+
+Func _GetRequiredHeroesForMission($missionName)
+    Local $name = StringLower(StringStripWS($missionName, 3))
+
+    ; Istan
+    If $name = "chahbek village" Then
+        Local $a1[1]; $a1[0] = $GC_I_HERO_ID_KOSS
+        Return $a1
+    EndIf
+    If $name = "jokanur diggings" Then
+        Local $a2[1]; $a2[0] = $GC_I_HERO_ID_MELONNI
+        Return $a2
+    EndIf
+    If $name = "consulate docks" Then
+        Local $a3[1]; $a3[0] = $GC_I_HERO_ID_DUNKORO
+        Return $a3
+    EndIf
+
+    ; Kourna
+    If $name = "venta cemetery" Then
+        Local $a4[1]; $a4[0] = $GC_I_HERO_ID_KOSS
+        Return $a4
+    EndIf
+    If $name = "pogahn passage" Then
+        Local $a5[1]; $a5[0] = $GC_I_HERO_ID_MARGRID_THE_SLY
+        Return $a5
+    EndIf
+    If $name = "rilohn refuge" Then
+        Local $a6[1]; $a6[0] = $GC_I_HERO_ID_MASTER_OF_WHISPERS
+        Return $a6
+    EndIf
+    If $name = "kodonur crossroads" Then
+        Local $a7[1]; $a7[0] = $GC_I_HERO_ID_ZHED_SHADOWHOOF
+        Return $a7
+    EndIf
+
+    ; Vabbi
+    If $name = "moddok crevice" Then
+        Local $a8[1]; $a8[0] = $GC_I_HERO_ID_DUNKORO
+        Return $a8
+    EndIf
+    If $name = "nundu bay" Then
+        Local $a9[1]; $a9[0] = $GC_I_HERO_ID_MELONNI
+        Return $a9
+    EndIf
+    If $name = "dzagonur bastion" Then
+        Local $a10[1]; $a10[0] = $GC_I_HERO_ID_MASTER_OF_WHISPERS
+        Return $a10
+    EndIf
+    If $name = "grand court of sebelkeh" Then
+        Local $a11[1]; $a11[0] = $GC_I_HERO_ID_TAHLKORA
+        Return $a11
+    EndIf
+    If $name = "jennur's horde" Or $name = "jennurs horde" Then
+        Local $a12[1]; $a12[0] = $GC_I_HERO_ID_KOSS
+        Return $a12
+    EndIf
+    If $name = "tihark orchard" Then
+        Local $a13[1]; $a13[0] = 0
+        Return $a13
+    EndIf
+
+    ; Desolation / Realm of Torment
+    If $name = "gate of desolation" Then
+        Local $a14[1]; $a14[0] = $GC_I_HERO_ID_ZHED_SHADOWHOOF
+        Return $a14
+    EndIf
+    If $name = "ruins of morah" Then
+        Local $a15[1]; $a15[0] = $GC_I_HERO_ID_GENERAL_MORGAHN
+        Return $a15
+    EndIf
+    If $name = "gate of madness" Or $name = "abaddon's gate" Or $name = "abaddons gate" Then
+        Local $a16[1]; $a16[0] = 0
+        Return $a16
+    EndIf
+
+    Local $a0[1]; $a0[0] = 0
+    Return $a0
+EndFunc
+
+Func _MergeHeroes(ByRef $required, ByRef $user, $cap)
+    ; Build union with required first, then user, unique, trimmed to cap
+    Local $buf[1], $count = 0
+    ; required first
+    For $i = 0 To UBound($required)-1
+        If $required[$i] = 0 Then ContinueLoop
+        If Not _Contains($buf, $count, $required[$i]) Then _Append($buf, $count, $required[$i])
+    Next
+    ; then user
+    For $j = 0 To UBound($user)-1
+        If $user[$j] = 0 Then ContinueLoop
+        If Not _Contains($buf, $count, $user[$j]) Then _Append($buf, $count, $user[$j])
+    Next
+    ; trim to cap
+    If $count > $cap Then
+        _Warn("Team exceeds cap (" & $count & " > " & $cap & "). Trimming extras (kept required first).")
+        $count = $cap
+    EndIf
+    If $count = 0 Then
+        Local $a0[1]; $a0[0] = 0
+        Return $a0
+    EndIf
+    Local $out[$count]
+    For $k = 0 To $count-1
+        $out[$k] = $buf[$k]
+    Next
+    Return $out
+EndFunc
+
+Func _Contains(ByRef $arr, $count, $val)
+    For $i = 0 To $count-1
+        If $arr[$i] = $val Then Return True
+    Next
+    Return False
+EndFunc
+
+Func _Append(ByRef $arr, ByRef $count, $val)
+    If $count >= UBound($arr) Then
+        ReDim $arr[UBound($arr) * 2]
+    EndIf
+    $arr[$count] = $val
+    $count += 1
+EndFunc
+
+Func _JoinIDs(ByRef $arr)
+    Local $s = ""
+    For $i = 0 To UBound($arr)-1
+        $s &= $arr[$i] & ","
+    Next
+    If StringRight($s,1) = "," Then $s = StringTrimRight($s,1)
+    Return $s
+EndFunc
+
+; ===================== Helpers =====================
+Func _MissionNameToFunc($name)
+    Local $s = StringRegExpReplace($name, "[^A-Za-z0-9]", "")
+    Return $s & "Mission"
+EndFunc
+
+Func _GuiFillCombo($hCombo, ByRef $arr)
+    Local $s = ""
+    For $i = 0 To UBound($arr)-1
+        $s &= $arr[$i] & "|"
+    Next
+    If StringRight($s,1) = "|" Then $s = StringTrimRight($s,1)
+    GUICtrlSetData($hCombo, $s, "")
+EndFunc
+
+Func _ToRegex($s)
+    If StringInStr($s, "^") Or StringInStr($s, "$") Or StringInStr($s, ".*") Then Return $s
+    Local $esc = $s
+    Local $spec[12] = ["\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]"]
+    For $i = 0 To UBound($spec)-1
+        $esc = StringReplace($esc, $spec[$i], "\" & $spec[$i])
+    Next
+    Return "(?i).*" & $esc & ".*"
+EndFunc
+
+Func _CheckAttach()
+    If Not $g_bAttached Or $g_h_GWProcess = 0 Then
+        _Err("Not attached. Click Attach first.")
+        Return False
+    EndIf
+    Return True
+EndFunc
+
+Func _Log($m)
+    Local $cur = GUICtrlRead($g_hLog)
+    GUICtrlSetData($g_hLog, $cur & $m & @CRLF)
+    _GUICtrlEdit_Scroll($g_hLog, 7)
+EndFunc
+
+Func _Warn($m)
+    Local $cur = GUICtrlRead($g_hLog)
+    GUICtrlSetData($g_hLog, $cur & "[WARN] " & $m & @CRLF)
+    _GUICtrlEdit_Scroll($g_hLog, 7)
+EndFunc
+
+Func _Err($m)
+    Local $cur = GUICtrlRead($g_hLog)
+    GUICtrlSetData($g_hLog, $cur & "[ERROR] " & $m & @CRLF)
+    _GUICtrlEdit_Scroll($g_hLog, 7)
+EndFunc
+
+; ===================== Cleanup =====================
+Func _Cleanup()
+    If IsDeclared("g_h_GWProcess") And $g_h_GWProcess <> 0 Then
+        If IsFunc("Memory_Close") Then Memory_Close()
+        $g_h_GWProcess = 0
+    EndIf
+    ; Close GUI
+    If $g_hGUI <> 0 Then GUIDelete($g_hGUI)
+EndFunc
+
+; ===================== Mission Functions (stub) =====================
+Func ConsulateDocksMission()
+    _Log("[Nightfall] Consulate Docks (stub)")
+EndFunc
